@@ -1,1 +1,12 @@
 # fastq-fasta--websearch
+
+
+A high-performance tool for searching DNA sequences in FASTA and FASTQ files by partial sequence name matching. Available in both Python and C++ implementations.
+
+## Features
+
+- **Fast searching**: Uses memory-mapped I/O (C++) and optimized regex patterns (Python) for rapid sequence identification
+- **Support for both FASTA and FASTQ formats**: Automatically detects file type based on extension or content
+- **Partial name matching**: Find sequences containing any part of the specified name
+- **Line number reporting**: Returns the exact line number where each matching sequence starts
+- **Full sequence extraction**: Retrieves complete sequence data and quality scores (for FASTQ)
