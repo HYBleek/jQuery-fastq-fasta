@@ -35,7 +35,7 @@ HHHHHHHHHHHHHHHHHHHH
 
 ### Developing
 
-Too many bugs now, fixing now
+Too many bugs, fixing now
 
 ## License
 
