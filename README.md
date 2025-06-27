@@ -37,6 +37,8 @@ HHHHHHHHHHHHHHHHHHHH
 
 Too many bugs, fixing now
 
+We might learn some methods from https://github.com/evanplaice/jquery-csv and develop, not sure yet
+
 ## License
 
 This project is licensed under the MIT License -
