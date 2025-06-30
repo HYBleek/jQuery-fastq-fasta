@@ -3,6 +3,8 @@
 
 A high-performance tool for searching DNA sequences in FASTA and FASTQ files by partial sequence name matching. Available in both Python and C++ implementations.
 
+We implement a new method using JavaScript
+
 ## Features
 
 - **Fast searching**: Uses memory-mapped I/O (C++) and optimized regex patterns (Python) for rapid sequence identification
