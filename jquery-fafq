@@ -1,300 +1,462 @@
+/* eslint no-prototype-builtins: 0 */
 /**
- * Fast FASTA/FASTQ Sequence Search Tool for Node.js
- * Optimized for web server usage with streaming and async operations
+ * fasta-fastq-parser (JavaScript Library)
+ *
+ * This document is licensed as free software under the terms of the
+ * MIT License: http://www.opensource.org/licenses/mit-license.php
+ *
+ * A high-performance FASTA/FASTQ parser inspired by the jQuery-csv design patterns.
+ * Uses finite state machine approach for parsing biological sequence data.
+ *
+ * For legal purposes: "NO WARRANTY EXPRESSED OR IMPLIED. USE AT YOUR OWN RISK."
  */
 
-const fs = require('fs');
-const readline = require('readline');
-const { Transform } = require('stream');
-const path = require('path');
-
-class SequenceSearcher {
-    constructor(filename) {
-        this.filename = filename;
-        this.fileType = this.detectFileType();
-    }
-
-    detectFileType() {
-        const ext = path.extname(this.filename).toLowerCase();
-        if (['.fa', '.fasta'].includes(ext)) {
-            return 'fasta';
-        } else if (['.fq', '.fastq'].includes(ext)) {
-            return 'fastq';
-        }
-        
-        // Auto-detect from content if extension is unclear
-        try {
-            const firstLine = fs.readFileSync(this.filename, 'utf8').split('\n')[0];
-            if (firstLine.startsWith('>')) return 'fasta';
-            if (firstLine.startsWith('@')) return 'fastq';
-        } catch (err) {
-            throw new Error(`Cannot determine file type: ${err.message}`);
-        }
-        
-        throw new Error('Unknown file format');
-    }
-
-    /**
-     * Stream-based search - memory efficient for large files
-     * Returns a promise that resolves to array of results
-     */
-    async searchSequenceStream(partialName) {
-        return new Promise((resolve, reject) => {
-            const results = [];
-            const fileStream = fs.createReadStream(this.filename);
-            const rl = readline.createInterface({
-                input: fileStream,
-                crlfDelay: Infinity
-            });
-
-            let lineNumber = 0;
-            let currentHeader = null;
-            let currentLineNum = 0;
-            let currentSequence = null;
-            let expectingQuality = false;
-
-            rl.on('line', (line) => {
-                lineNumber++;
-                line = line.trim();
-
-                if (!line) return;
-
-                const headerChar = this.fileType === 'fasta' ? '>' : '@';
-
-                if (line.startsWith(headerChar)) {
-                    // Process previous sequence if it matched
-                    if (currentHeader && currentHeader.includes(partialName)) {
-                        results.push({
-                            lineNumber: currentLineNum,
-                            header: currentHeader,
-                            sequence: currentSequence,
-                            quality: null
-                        });
-                    }
-
-                    // Start new sequence
-                    currentHeader = line.substring(1);
-                    currentLineNum = lineNumber;
-                    currentSequence = null;
-                    expectingQuality = false;
-                } else if (currentHeader && !currentSequence) {
-                    // This is the sequence line
-                    currentSequence = line;
-                    if (this.fileType === 'fastq') {
-                        expectingQuality = true;
-                    }
-                } else if (this.fileType === 'fastq' && line.startsWith('+')) {
-                    // Plus line in FASTQ, next line is quality
-                } else if (this.fileType === 'fastq' && expectingQuality && currentSequence) {
-                    // Quality line in FASTQ
-                    if (currentHeader.includes(partialName)) {
-                        results.push({
-                            lineNumber: currentLineNum,
-                            header: currentHeader,
-                            sequence: currentSequence,
-                            quality: line
-                        });
-                    }
-                    currentHeader = null;
-                    expectingQuality = false;
-                }
-            });
-
-            rl.on('close', () => {
-                // Handle last sequence for FASTA files
-                if (this.fileType === 'fasta' && currentHeader && 
-                    currentHeader.includes(partialName) && currentSequence) {
-                    results.push({
-                        lineNumber: currentLineNum,
-                        header: currentHeader,
-                        sequence: currentSequence,
-                        quality: null
-                    });
-                }
-                resolve(results);
-            });
-
-            rl.on('error', reject);
-        });
-    }
-
-    /**
-     * Buffer-based search - faster for smaller files
-     * Loads entire file into memory
-     */
-    async searchSequenceFast(partialName) {
-        const content = await fs.promises.readFile(this.filename, 'utf8');
-        const lines = content.split('\n');
-        const results = [];
-        
-        let i = 0;
-        while (i < lines.length) {
-            const line = lines[i].trim();
-            
-            if (!line) {
-                i++;
-                continue;
-            }
-            
-            const headerChar = this.fileType === 'fasta' ? '>' : '@';
-            
-            if (line.startsWith(headerChar)) {
-                const header = line.substring(1);
-                
-                if (header.includes(partialName)) {
-                    const lineNumber = i + 1;
-                    
-                    // Get sequence
-                    if (i + 1 < lines.length) {
-                        const sequence = lines[i + 1].trim();
-                        
-                        let quality = null;
-                        if (this.fileType === 'fastq' && i + 3 < lines.length) {
-                            quality = lines[i + 3].trim();
-                        }
-                        
-                        results.push({
-                            lineNumber,
-                            header,
-                            sequence,
-                            quality
-                        });
-                    }
-                }
-                
-                // Skip to next record
-                i += this.fileType === 'fasta' ? 2 : 4;
-            } else {
-                i++;
-            }
-        }
-        
-        return results;
-    }
-
-    /**
-     * Regex-based search - good balance of speed and memory
-     */
-    async searchSequenceRegex(partialName) {
-        const content = await fs.promises.readFile(this.filename, 'utf8');
-        const results = [];
-        
-        // Escape special regex characters in the search term
-        const escapedName = partialName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        
-        // Create regex pattern based on file type
-        const headerChar = this.fileType === 'fasta' ? '>' : '@';
-        const pattern = new RegExp(
-            `^\\${headerChar}(.*${escapedName}.*)\\n([^\\n]+)(?:\\n\\+\\n([^\\n]+))?`,
-            'gm'
-        );
-        
-        let match;
-        let lineOffset = 0;
-        
-        while ((match = pattern.exec(content)) !== null) {
-            // Calculate line number
-            const beforeMatch = content.substring(0, match.index);
-            const lineNumber = beforeMatch.split('\n').length;
-            
-            results.push({
-                lineNumber,
-                header: match[1],
-                sequence: match[2],
-                quality: match[3] || null
-            });
-        }
-        
-        return results;
-    }
+// Polyfill for RegExp.escape if needed
+if (!RegExp.escape) {
+  RegExp.escape = function (s) {
+    return s.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&')
+  }
 }
 
-/**
- * Express.js route handler example
- */
-async function searchSequenceHandler(req, res) {
-    try {
-        const { filename, partialName, method = 'stream' } = req.query;
-        
-        if (!filename || !partialName) {
-            return res.status(400).json({
-                error: 'Missing required parameters: filename and partialName'
-            });
-        }
-        
-        const searcher = new SequenceSearcher(filename);
-        
-        let results;
-        switch (method) {
-            case 'fast':
-                results = await searcher.searchSequenceFast(partialName);
-                break;
-            case 'regex':
-                results = await searcher.searchSequenceRegex(partialName);
-                break;
-            case 'stream':
-            default:
-                results = await searcher.searchSequenceStream(partialName);
-                break;
-        }
-        
-        res.json({
-            success: true,
-            count: results.length,
-            results: results
-        });
-        
-    } catch (error) {
-        res.status(500).json({
-            success: false,
-            error: error.message
-        });
-    }
-}
+(function () {
+  'use strict'
 
-/**
- * Command line interface
- */
-if (require.main === module) {
-    const args = process.argv.slice(2);
-    
-    if (args.length !== 2) {
-        console.log('Usage: node seq_search.js <filename> <partial_sequence_name>');
-        console.log('Example: node seq_search.js data.fasta seq123');
-        process.exit(1);
-    }
-    
-    const [filename, partialName] = args;
-    
-    const searcher = new SequenceSearcher(filename);
-    
-    // Use stream method for command line (memory efficient)
-    searcher.searchSequenceStream(partialName)
-        .then(results => {
-            if (results.length === 0) {
-                console.log(`No sequences found containing '${partialName}'`);
-            } else {
-                console.log(`Found ${results.length} sequence(s) containing '${partialName}':\n`);
-                
-                results.forEach(result => {
-                    console.log(`Line number: ${result.lineNumber}`);
-                    console.log(`Sequence name: ${result.header}`);
-                    console.log(`Sequence data: ${result.sequence}`);
-                    if (result.quality) {
-                        console.log(`Quality scores: ${result.quality}`);
-                    }
-                    console.log('-'.repeat(50));
-                });
+  let $
+
+  // To keep compatibility with different environments
+  if (typeof module !== 'undefined' && module.exports) {
+    $ = {}
+  } else if (typeof window !== 'undefined') {
+    $ = window.$ || {}
+    window.$ = $
+  } else {
+    $ = {}
+  }
+
+  /**
+   * $.seq.defaults
+   * Encapsulates the method parameter defaults for the sequence parser module.
+   */
+  $.seq = {
+    defaults: {
+      headerChar: '>',
+      fastqHeaderChar: '@',
+      fastqQualChar: '+',
+      caseSensitive: false
+    },
+
+    hooks: {
+      castHeader: function (header, state) {
+        // Default: trim whitespace
+        return header.trim()
+      },
+      castSequence: function (sequence, state) {
+        // Default: remove whitespace and convert to uppercase
+        return sequence.replace(/\s/g, '').toUpperCase()
+      },
+      castQuality: function (quality, state) {
+        // Default: just trim
+        return quality.trim()
+      }
+    },
+
+    parsers: {
+      /**
+       * Main parse function using state machine approach
+       */
+      parse: function (data, options) {
+        // Cache settings
+        const headerChar = options.headerChar
+        const fastqHeaderChar = options.fastqHeaderChar
+        const fastqQualChar = options.fastqQualChar
+        const targetName = options.targetName
+        const caseSensitive = options.caseSensitive
+
+        // Set initial state if missing
+        if (!options.state.lineNum) {
+          options.state.lineNum = 1
+        }
+
+        // Detect file type
+        const isFirstCharFastq = data.charAt(0) === fastqHeaderChar
+        const isFastq = options.format === 'fastq' || isFirstCharFastq
+
+        // Results storage
+        const results = []
+        let currentRecord = null
+        let state = 0 // 0: seeking header, 1: in header, 2: in sequence, 3: in plus, 4: in quality
+        let buffer = ''
+
+        // Helper function to check if header matches target
+        function matchesTarget(header) {
+          if (!targetName) return true
+          const headerToCheck = caseSensitive ? header : header.toLowerCase()
+          const targetToCheck = caseSensitive ? targetName : targetName.toLowerCase()
+          return headerToCheck.indexOf(targetToCheck) !== -1
+        }
+
+        // Helper function to finalize a record
+        function finalizeRecord() {
+          if (currentRecord && currentRecord.header) {
+            if (matchesTarget(currentRecord.header)) {
+              // Apply hooks
+              if (options.onParseEntry === undefined || options.onParseEntry(currentRecord, options.state) !== false) {
+                results.push(currentRecord)
+              }
             }
-        })
-        .catch(error => {
-            console.error(`Error: ${error.message}`);
-            process.exit(1);
-        });
-}
+          }
+          currentRecord = null
+        }
 
-// Export for use as module
-module.exports = {
-    SequenceSearcher,
-    searchSequenceHandler
-};
+        // Escape regex-specific control chars
+        const escHeaderChar = RegExp.escape(headerChar)
+        const escFastqHeaderChar = RegExp.escape(fastqHeaderChar)
+
+        // Compile regex for line splitting
+        let match = /(\r\n|\n|\r)/
+        
+        // Split into lines for processing
+        const lines = data.split(match)
+        
+        // Process lines with state machine
+        for (let i = 0; i < lines.length; i++) {
+          const line = lines[i]
+          
+          // Skip newline matches from regex
+          if (line === '\n' || line === '\r' || line === '\r\n') {
+            if (buffer && (state === 2 || state === 4)) {
+              // Process accumulated buffer
+              if (state === 2 && currentRecord) {
+                currentRecord.sequence = (currentRecord.sequence || '') + buffer
+              } else if (state === 4 && currentRecord) {
+                currentRecord.quality = (currentRecord.quality || '') + buffer
+              }
+              buffer = ''
+            }
+            options.state.lineNum++
+            continue
+          }
+
+          // State machine processing
+          switch (state) {
+            case 0: // Seeking header
+              if (line.charAt(0) === headerChar || (isFastq && line.charAt(0) === fastqHeaderChar)) {
+                // Found header, finalize previous record
+                finalizeRecord()
+                
+                // Start new record
+                currentRecord = {
+                  headerLine: options.state.lineNum,
+                  header: line.substring(1), // Remove header char
+                  sequenceLine: options.state.lineNum + 1
+                }
+                
+                // Apply header hook
+                if (options.onParseValue !== undefined) {
+                  currentRecord.header = options.onParseValue(currentRecord.header, options.state)
+                } else if ($.seq.hooks.castHeader) {
+                  currentRecord.header = $.seq.hooks.castHeader(currentRecord.header, options.state)
+                }
+                
+                state = 1 // Move to header state
+              }
+              break
+
+            case 1: // In header (expecting sequence next)
+              if (line.charAt(0) === headerChar || (isFastq && line.charAt(0) === fastqHeaderChar)) {
+                // New header found, process as new record
+                finalizeRecord()
+                currentRecord = {
+                  headerLine: options.state.lineNum,
+                  header: line.substring(1),
+                  sequenceLine: options.state.lineNum + 1
+                }
+                if ($.seq.hooks.castHeader) {
+                  currentRecord.header = $.seq.hooks.castHeader(currentRecord.header, options.state)
+                }
+              } else if (line.charAt(0) === fastqQualChar && isFastq) {
+                state = 3 // Move to plus line
+              } else if (line.trim()) {
+                // This is sequence data
+                currentRecord.sequence = line
+                currentRecord.sequenceLine = options.state.lineNum
+                state = isFastq ? 3 : 2 // FASTQ expects plus line, FASTA continues sequence
+              }
+              break
+
+            case 2: // In sequence (FASTA multi-line)
+              if (line.charAt(0) === headerChar) {
+                // Apply sequence hook before finalizing
+                if (currentRecord.sequence && $.seq.hooks.castSequence) {
+                  currentRecord.sequence = $.seq.hooks.castSequence(currentRecord.sequence, options.state)
+                }
+                
+                // New header found
+                finalizeRecord()
+                currentRecord = {
+                  headerLine: options.state.lineNum,
+                  header: line.substring(1),
+                  sequenceLine: options.state.lineNum + 1
+                }
+                if ($.seq.hooks.castHeader) {
+                  currentRecord.header = $.seq.hooks.castHeader(currentRecord.header, options.state)
+                }
+                state = 1
+              } else if (line.trim()) {
+                // Continue accumulating sequence
+                currentRecord.sequence = (currentRecord.sequence || '') + line
+              }
+              break
+
+            case 3: // In plus line (FASTQ)
+              if (line.charAt(0) === fastqQualChar) {
+                state = 4 // Move to quality
+              }
+              break
+
+            case 4: // In quality (FASTQ)
+              if (line.charAt(0) === fastqHeaderChar) {
+                // Apply quality hook
+                if (currentRecord.quality && $.seq.hooks.castQuality) {
+                  currentRecord.quality = $.seq.hooks.castQuality(currentRecord.quality, options.state)
+                }
+                
+                // New record
+                finalizeRecord()
+                currentRecord = {
+                  headerLine: options.state.lineNum,
+                  header: line.substring(1),
+                  sequenceLine: options.state.lineNum + 1
+                }
+                if ($.seq.hooks.castHeader) {
+                  currentRecord.header = $.seq.hooks.castHeader(currentRecord.header, options.state)
+                }
+                state = 1
+              } else if (line.trim()) {
+                currentRecord.quality = line
+                // After quality, we expect a new record or end
+                state = 0
+              }
+              break
+          }
+
+          options.state.lineNum++
+        }
+
+        // Finalize last record
+        if (currentRecord) {
+          if (currentRecord.sequence && $.seq.hooks.castSequence) {
+            currentRecord.sequence = $.seq.hooks.castSequence(currentRecord.sequence, options.state)
+          }
+          if (currentRecord.quality && $.seq.hooks.castQuality) {
+            currentRecord.quality = $.seq.hooks.castQuality(currentRecord.quality, options.state)
+          }
+        }
+        finalizeRecord()
+
+        return results
+      },
+
+      /**
+       * Parse a single sequence entry
+       */
+      parseEntry: function (data, options) {
+        const results = $.seq.parsers.parse(data, options)
+        return results.length > 0 ? results[0] : null
+      }
+    },
+
+    helpers: {
+      /**
+       * Detect file format from content
+       */
+      detectFormat: function (data) {
+        const firstChar = data.trim().charAt(0)
+        if (firstChar === '@') return 'fastq'
+        if (firstChar === '>') return 'fasta'
+        return 'unknown'
+      },
+
+      /**
+       * Validate sequence data
+       */
+      isValidSequence: function (sequence) {
+        // Check if sequence contains only valid nucleotides
+        return /^[ATCGN\-]+$/i.test(sequence.replace(/\s/g, ''))
+      }
+    },
+
+    /**
+     * $.seq.find(data, targetName, options)
+     * Find a specific sequence by name (partial match)
+     *
+     * @param {String} data The string containing the sequence data
+     * @param {String} targetName Partial name to search for
+     * @param {Object} [options] An object containing user-defined options
+     */
+    find: function (data, targetName, options, callback) {
+      // Handle callback in options position
+      if (options !== undefined && typeof options === 'function') {
+        if (callback !== undefined) {
+          return console.error('You cannot provide 3 arguments with the 2nd argument being a function')
+        }
+        callback = options
+        options = {}
+      }
+
+      options = options || {}
+      const config = {}
+      config.callback = ((callback !== undefined && typeof callback === 'function') ? callback : false)
+      config.headerChar = 'headerChar' in options ? options.headerChar : $.seq.defaults.headerChar
+      config.fastqHeaderChar = 'fastqHeaderChar' in options ? options.fastqHeaderChar : $.seq.defaults.fastqHeaderChar
+      config.fastqQualChar = 'fastqQualChar' in options ? options.fastqQualChar : $.seq.defaults.fastqQualChar
+      config.caseSensitive = 'caseSensitive' in options ? options.caseSensitive : $.seq.defaults.caseSensitive
+
+      // Detect format
+      config.format = options.format || $.seq.helpers.detectFormat(data)
+
+      // Setup options
+      const parseOptions = {
+        headerChar: config.headerChar,
+        fastqHeaderChar: config.fastqHeaderChar,
+        fastqQualChar: config.fastqQualChar,
+        format: config.format,
+        targetName: targetName,
+        caseSensitive: config.caseSensitive,
+        onParseEntry: options.onParseEntry,
+        onParseValue: options.onParseValue,
+        state: { lineNum: 1 }
+      }
+
+      const result = $.seq.parsers.parseEntry(data, parseOptions)
+
+      if (!config.callback) {
+        return result
+      } else {
+        config.callback('', result)
+      }
+    },
+
+    /**
+     * $.seq.findAll(data, targetName, options)
+     * Find all sequences matching a partial name
+     *
+     * @param {String} data The string containing the sequence data
+     * @param {String} targetName Partial name to search for
+     * @param {Object} [options] An object containing user-defined options
+     */
+    findAll: function (data, targetName, options, callback) {
+      // Handle callback in options position
+      if (options !== undefined && typeof options === 'function') {
+        if (callback !== undefined) {
+          return console.error('You cannot provide 3 arguments with the 2nd argument being a function')
+        }
+        callback = options
+        options = {}
+      }
+
+      options = options || {}
+      const config = {}
+      config.callback = ((callback !== undefined && typeof callback === 'function') ? callback : false)
+      config.headerChar = 'headerChar' in options ? options.headerChar : $.seq.defaults.headerChar
+      config.fastqHeaderChar = 'fastqHeaderChar' in options ? options.fastqHeaderChar : $.seq.defaults.fastqHeaderChar
+      config.fastqQualChar = 'fastqQualChar' in options ? options.fastqQualChar : $.seq.defaults.fastqQualChar
+      config.caseSensitive = 'caseSensitive' in options ? options.caseSensitive : $.seq.defaults.caseSensitive
+
+      // Detect format
+      config.format = options.format || $.seq.helpers.detectFormat(data)
+
+      // Setup options
+      const parseOptions = {
+        headerChar: config.headerChar,
+        fastqHeaderChar: config.fastqHeaderChar,
+        fastqQualChar: config.fastqQualChar,
+        format: config.format,
+        targetName: targetName,
+        caseSensitive: config.caseSensitive,
+        onParseEntry: options.onParseEntry,
+        onParseValue: options.onParseValue,
+        onPreParse: options.onPreParse,
+        onPostParse: options.onPostParse,
+        state: { lineNum: 1 }
+      }
+
+      // Apply pre-parse hook
+      if (parseOptions.onPreParse !== undefined) {
+        data = parseOptions.onPreParse(data, parseOptions.state)
+      }
+
+      const results = $.seq.parsers.parse(data, parseOptions)
+
+      // Apply post-parse hook
+      if (parseOptions.onPostParse !== undefined) {
+        results = parseOptions.onPostParse(results, parseOptions.state)
+      }
+
+      if (!config.callback) {
+        return results
+      } else {
+        config.callback('', results)
+      }
+    },
+
+    /**
+     * $.seq.toArray(data, options)
+     * Parse all sequences into an array
+     */
+    toArray: function (data, options, callback) {
+      return $.seq.findAll(data, null, options, callback)
+    }
+  }
+
+  // Maintain backward compatibility aliases
+  $.sequence = $.seq
+  $.fasta = $.seq
+  $.fastq = $.seq
+
+  // CommonJS module is defined
+  if (typeof module !== 'undefined' && module.exports) {
+    module.exports = $.seq
+  }
+}).call(this)
+
+// Node.js command line interface
+if (typeof require !== 'undefined' && require.main === module) {
+  const fs = require('fs')
+  const path = require('path')
+  
+  if (process.argv.length !== 4) {
+    console.error('Usage: node fasta_fastq_parser.js <filename> <sequence_name_part>')
+    process.exit(1)
+  }
+  
+  const filename = process.argv[2]
+  const searchTerm = process.argv[3]
+  
+  try {
+    const data = fs.readFileSync(filename, 'utf8')
+    const $ = { seq: module.exports }
+    
+    // Find first match
+    const result = $.seq.find(data, searchTerm)
+    
+    if (result) {
+      console.log('Found sequence:')
+      console.log(`  Header at line ${result.headerLine}: ${result.header}`)
+      console.log(`  Sequence at line ${result.sequenceLine}: ${result.sequence.substring(0, 50)}${result.sequence.length > 50 ? '...' : ''}`)
+      console.log(`  Sequence length: ${result.sequence.length}`)
+      
+      // Check for more matches
+      const allResults = $.seq.findAll(data, searchTerm)
+      if (allResults.length > 1) {
+        console.log(`\nNote: Found ${allResults.length} total matches. Use findAll() to get all.`)
+      }
+    } else {
+      console.log(`No sequence found containing '${searchTerm}'`)
+    }
+    
+  } catch (error) {
+    console.error(`Error: ${error.message}`)
+    process.exit(1)
+  }
+}
