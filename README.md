@@ -13,6 +13,14 @@ We implement a new method using JavaScript
 - **Line number reporting**: Returns the exact line number where each matching sequence starts
 - **Full sequence extraction**: Retrieves complete sequence data and quality scores (for FASTQ)
 
+## Finite State Machine (FSM) Approach
+The parser uses a clean FSM with 4 states:
+
+- **State 0**: Start of a value
+- **State 1**: Inside a delimited value
+- **State 2**: Delimiter found (checking if it's escaped)
+- **State 3**: Inside an undelimited value
+
 ## File Format Support
 
 ### FASTA Format (.fa, .fasta)
