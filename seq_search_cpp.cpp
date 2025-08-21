@@ -313,7 +313,7 @@ int main(int argc, char* argv[]) {
                 std::cout << std::string(50, '-') << std::endl;
             }
         }
-        
+         
     } catch (const std::exception& e) {
         std::cerr << "Error: " << e.what() << std::endl;
         return 1;
